@@ -46,14 +46,17 @@ import com.google.inject.Inject;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.eclipse.egit.github.core.Issue;
 import org.eclipse.egit.github.core.Repository;
 import org.eclipse.egit.github.core.RepositoryId;
 import org.eclipse.egit.github.core.RepositoryIssue;
+import org.eclipse.egit.github.core.Team;
 import org.eclipse.egit.github.core.User;
 import org.eclipse.egit.github.core.service.CollaboratorService;
+import org.eclipse.egit.github.core.service.TeamService;
 
 /**
  * Activity to display a collection of issues or pull requests in a pager
@@ -80,7 +83,7 @@ public class IssuesViewActivity extends PagerActivity {
      * @return intent
      */
     public static Intent createIntent(final Issue issue,
-            final Repository repository) {
+        final Repository repository) {
         return createIntent(Collections.singletonList(issue), repository, 0);
     }
 
@@ -93,7 +96,7 @@ public class IssuesViewActivity extends PagerActivity {
      * @return intent
      */
     public static Intent createIntent(final Collection<? extends Issue> issues,
-            final Repository repository, final int position) {
+        final Repository repository, final int position) {
         int[] numbers = new int[issues.size()];
         boolean[] pullRequests = new boolean[issues.size()];
         int index = 0;
@@ -103,9 +106,9 @@ public class IssuesViewActivity extends PagerActivity {
             index++;
         }
         return new Builder("issues.VIEW").add(EXTRA_ISSUE_NUMBERS, numbers)
-                .add(EXTRA_REPOSITORY, repository)
-                .add(EXTRA_POSITION, position)
-                .add(EXTRA_PULL_REQUESTS, pullRequests).toIntent();
+            .add(EXTRA_REPOSITORY, repository)
+            .add(EXTRA_POSITION, position)
+            .add(EXTRA_PULL_REQUESTS, pullRequests).toIntent();
     }
 
     /**
@@ -116,11 +119,11 @@ public class IssuesViewActivity extends PagerActivity {
      * @return intent
      */
     public static Intent createIntent(Collection<? extends Issue> issues,
-            int position) {
+        int position) {
         final int count = issues.size();
         int[] numbers = new int[count];
         boolean[] pullRequests = new boolean[count];
-        ArrayList<RepositoryId> repos = new ArrayList<RepositoryId>(count);
+        ArrayList<RepositoryId> repos = new ArrayList<>(count);
         int index = 0;
         for (Issue issue : issues) {
             numbers[index] = issue.getNumber();
@@ -130,12 +133,12 @@ public class IssuesViewActivity extends PagerActivity {
             RepositoryId repoId = null;
             if (issue instanceof RepositoryIssue) {
                 Repository issueRepo = ((RepositoryIssue) issue)
-                        .getRepository();
+                    .getRepository();
                 if (issueRepo != null) {
                     User owner = issueRepo.getOwner();
                     if (owner != null)
                         repoId = RepositoryId.create(owner.getLogin(),
-                                issueRepo.getName());
+                            issueRepo.getName());
                 }
             }
             if (repoId == null)
@@ -168,11 +171,16 @@ public class IssuesViewActivity extends PagerActivity {
     private IssueStore store;
 
     @Inject
+    private TeamService teamService;
+
+    @Inject
     private CollaboratorService collaboratorService;
 
-    private final AtomicReference<User> user = new AtomicReference<User>();
+    private final AtomicReference<User> user = new AtomicReference<>();
 
     private boolean isCollaborator;
+
+    private boolean isOwner;
 
     private IssuesPagerAdapter adapter;
 
@@ -180,7 +188,6 @@ public class IssuesViewActivity extends PagerActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        getSupportActionBar().setDisplayHomeAsUpEnabled(true);
         issueNumbers = getIntArrayExtra(EXTRA_ISSUE_NUMBERS);
         pullRequests = getBooleanArrayExtra(EXTRA_PULL_REQUESTS);
         repoIds = getSerializableExtra(EXTRA_REPOSITORIES);
@@ -188,6 +195,9 @@ public class IssuesViewActivity extends PagerActivity {
 
         setContentView(R.layout.pager);
 
+        setSupportActionBar((android.support.v7.widget.Toolbar) findViewById(R.id.toolbar));
+
+        getSupportActionBar().setDisplayHomeAsUpEnabled(true);
         if (repo != null) {
             ActionBar actionBar = getSupportActionBar();
             actionBar.setSubtitle(repo.generateId());
@@ -198,18 +208,26 @@ public class IssuesViewActivity extends PagerActivity {
         // Load avatar if single issue and user is currently unset or missing
         // avatar URL
         if (issueNumbers.length == 1
-                && (user.get() == null || user.get().getAvatarUrl() == null))
+            && (user.get() == null || user.get().getAvatarUrl() == null))
             new RefreshRepositoryTask(this, repo != null ? repo : repoIds.get(0)) {
 
                 @Override
                 protected void onSuccess(Repository fullRepository)
-                        throws Exception {
+                    throws Exception {
                     super.onSuccess(fullRepository);
 
                     avatars.bind(getSupportActionBar(),
-                            fullRepository.getOwner());
+                        fullRepository.getOwner());
                 }
             }.execute();
+
+        isOwner = false;
+        if(repo != null) {
+            if (!AccountUtils.isUser(this, repo.getOwner()))
+                checkOwnerStatus();
+            else
+                isOwner = repo.getOwner().getLogin().equals(AccountUtils.getLogin(this));
+        }
 
         isCollaborator = false;
         checkCollaboratorStatus();
@@ -220,9 +238,9 @@ public class IssuesViewActivity extends PagerActivity {
         pager = finder.find(R.id.vp_pages);
 
         if (repo != null)
-            adapter = new IssuesPagerAdapter(this, repo, issueNumbers, isCollaborator);
+            adapter = new IssuesPagerAdapter(this, repo, issueNumbers, isCollaborator, isOwner);
         else
-            adapter = new IssuesPagerAdapter(this, repoIds, issueNumbers, store, isCollaborator);
+            adapter = new IssuesPagerAdapter(this, repoIds, issueNumbers, store, isCollaborator, isOwner);
         pager.setAdapter(adapter);
 
         pager.setOnPageChangeListener(this);
@@ -236,10 +254,10 @@ public class IssuesViewActivity extends PagerActivity {
 
         if (pullRequest)
             getSupportActionBar().setTitle(
-                    getString(R.string.pull_request_title) + number);
+                getString(R.string.pull_request_title) + number);
         else
             getSupportActionBar().setTitle(
-                    getString(R.string.issue_title) + number);
+                getString(R.string.issue_title) + number);
     }
 
     @Override
@@ -260,7 +278,7 @@ public class IssuesViewActivity extends PagerActivity {
             updateTitle(position);
             actionBar.setSubtitle(repoId.generateId());
             RepositoryIssue issue = store.getIssue(repoId,
-                    issueNumbers[position]);
+                issueNumbers[position]);
             if (issue != null) {
                 Repository fullRepo = issue.getRepository();
                 if (fullRepo != null && fullRepo.getOwner() != null) {
@@ -279,7 +297,7 @@ public class IssuesViewActivity extends PagerActivity {
     @Override
     public void onDialogResult(int requestCode, int resultCode, Bundle arguments) {
         adapter.onDialogResult(pager.getCurrentItem(), requestCode, resultCode,
-                arguments);
+            arguments);
     }
 
     @Override
@@ -298,12 +316,6 @@ public class IssuesViewActivity extends PagerActivity {
 
     @Override
     public boolean onPrepareOptionsMenu(Menu menu) {
-        MenuItem editItem = menu.findItem(R.id.m_edit);
-        MenuItem stateItem = menu.findItem(R.id.m_state);
-        if (editItem != null && stateItem != null) {
-            editItem.setVisible(isCollaborator);
-            stateItem.setVisible(isCollaborator);
-        }
 
         return super.onPrepareOptionsMenu(menu);
     }
@@ -311,27 +323,27 @@ public class IssuesViewActivity extends PagerActivity {
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         switch (item.getItemId()) {
-        case android.R.id.home:
-            Repository repository = repo;
-            if (repository == null) {
-                int position = pager.getCurrentItem();
-                RepositoryId repoId = repoIds.get(position);
-                if (repoId != null) {
-                    RepositoryIssue issue = store.getIssue(repoId,
+            case android.R.id.home:
+                Repository repository = repo;
+                if (repository == null) {
+                    int position = pager.getCurrentItem();
+                    RepositoryId repoId = repoIds.get(position);
+                    if (repoId != null) {
+                        RepositoryIssue issue = store.getIssue(repoId,
                             issueNumbers[position]);
-                    if (issue != null)
-                        repository = issue.getRepository();
+                        if (issue != null)
+                            repository = issue.getRepository();
+                    }
                 }
-            }
-            if (repository != null) {
-                Intent intent = RepositoryViewActivity.createIntent(repository);
-                intent.addFlags(FLAG_ACTIVITY_CLEAR_TOP
+                if (repository != null) {
+                    Intent intent = RepositoryViewActivity.createIntent(repository);
+                    intent.addFlags(FLAG_ACTIVITY_CLEAR_TOP
                         | FLAG_ACTIVITY_SINGLE_TOP);
-                startActivity(intent);
-            }
-            return true;
-        default:
-            return super.onOptionsItemSelected(item);
+                    startActivity(intent);
+                }
+                return true;
+            default:
+                return super.onOptionsItemSelected(item);
         }
     }
 
@@ -341,7 +353,7 @@ public class IssuesViewActivity extends PagerActivity {
             @Override
             protected Boolean run(Account account) throws Exception {
                 return collaboratorService.isCollaborator(repo != null ? repo : repoIds.get(0),
-                        AccountUtils.getLogin(IssuesViewActivity.this));
+                    AccountUtils.getLogin(IssuesViewActivity.this));
             }
 
             @Override
@@ -355,6 +367,39 @@ public class IssuesViewActivity extends PagerActivity {
                 super.onSuccess(collaborator);
 
                 isCollaborator = collaborator;
+                invalidateOptionsMenu();
+                configurePager();
+            }
+        }.execute();
+    }
+
+    private void checkOwnerStatus() {
+        new AuthenticatedUserTask<Boolean>(this) {
+
+            @Override
+            protected Boolean run(Account account) throws Exception {
+                List<Team> teams = teamService.getTeams(repo.getOwner().getLogin());
+                List<User> users = teamService.getMembers(teams.get(0).getId());
+
+                String userName = AccountUtils.getLogin(IssuesViewActivity.this);
+                for(User user : users)
+                    if(user.getLogin().equals(userName))
+                        return true;
+
+                return false;
+            }
+
+            @Override
+            protected void onThrowable(Throwable t) throws RuntimeException {
+                invalidateOptionsMenu();
+                configurePager();
+            }
+
+            @Override
+            protected void onSuccess(Boolean owner) throws Exception {
+                super.onSuccess(owner);
+
+                isOwner = owner;
                 invalidateOptionsMenu();
                 configurePager();
             }
